@@ -124,11 +124,22 @@ def run_length_encoding(l):
     return r
 
 
-def run_length_decoding(l):
-    r = []
-    for i in range(0, len(l), 2):
-        r.extend(l[i] * [l[i + 1]])
-    return r
+def run_length_decoding(l, ignore_value=None):
+    if ignore_value == None:
+        idx = 0
+        for i in range(0, len(l), 2):
+            for j in range(l[i]):
+                yield idx, l[i + 1]
+                idx += 1
+    else:
+        idx = 0
+        for i in range(0, len(l), 2):
+            if l[i + 1] != ignore_value:
+                for j in range(l[i]):
+                    yield idx, l[i + 1]
+                    idx += 1
+            else:
+                idx += l[i]
 
 
 @stats_timer(shareData)
@@ -563,14 +574,14 @@ def decodeBaseMesh(client, obj, data, index):
                                         data[index:index + edges_smooth_buffer_size * 4])
     index += edges_smooth_buffer_size * 4
 
-    for edge_idx, smooth in enumerate(run_length_decoding(edges_smooth_buffer)):
+    for edge_idx, smooth in run_length_decoding(edges_smooth_buffer, 1):
         bm.edges[edge_idx].smooth = smooth
 
     edges_seam_buffer_size, index = common.decodeInt(data, index)
     edges_seam_buffer = struct.unpack(f'{edges_seam_buffer_size}I', data[index:index + edges_seam_buffer_size * 4])
     index += edges_seam_buffer_size * 4
 
-    for edge_idx, seam in enumerate(run_length_decoding(edges_seam_buffer)):
+    for edge_idx, seam in run_length_decoding(edges_seam_buffer, 0):
         bm.edges[edge_idx].seam = seam
 
     index = decode_bmesh_layer(data, index, bm.edges.layers.bevel_weight, bm.edges, decode_layer_float)
