@@ -4,6 +4,7 @@ from ..shareData import shareData
 
 import logging
 import struct
+import itertools
 
 import bpy
 import bmesh
@@ -114,6 +115,20 @@ def loops_iterator(bm):
     for face in bm.faces:
         for loop in face.loops:
             yield loop
+
+
+def run_length_encoding(l):
+    r = []
+    for name, group in itertools.groupby(l):
+        r.extend((len(list(group)), name))
+    return r
+
+
+def run_length_decoding(l):
+    r = []
+    for i in range(0, len(l), 2):
+        r.extend(l[i] * [l[i + 1]])
+    return r
 
 
 @stats_timer(shareData)
@@ -262,13 +277,23 @@ def encodeBaseMeshGeometry(mesh_data):
 
     edges_array = []
     for edge in bm.edges:
-        edges_array.extend((edge.verts[0].index, edge.verts[1].index, edge.smooth, edge.seam))
-
+        edges_array.extend((edge.verts[0].index, edge.verts[1].index))
     stats_timer.checkpoint("make_edges_buffer")
 
     binary_buffer += struct.pack(f"1I{len(edges_array)}I", len(bm.edges), *edges_array)
-
     stats_timer.checkpoint("encode_edges_buffer")
+
+    edges_smooth_array = run_length_encoding((edge.smooth for edge in bm.edges))
+    stats_timer.checkpoint("make_edges_smooth_buffer")
+
+    binary_buffer += struct.pack(f"1I{len(edges_smooth_array)}I", len(edges_smooth_array), *edges_smooth_array)
+    stats_timer.checkpoint("encode_edges_smooth_buffer")
+
+    edges_seam_array = run_length_encoding((edge.seam for edge in bm.edges))
+    stats_timer.checkpoint("make_edges_seam_buffer")
+
+    binary_buffer += struct.pack(f"1I{len(edges_seam_array)}I", len(edges_seam_array), *edges_seam_array)
+    stats_timer.checkpoint("encode_edges_seam_buffer")
 
     # Edge layers
     # Ignored layers for now: None
@@ -523,15 +548,30 @@ def decodeBaseMesh(client, obj, data, index):
     edgeCount, index = common.decodeInt(data, index)
     logger.debug("Reading %d edges", edgeCount)
 
-    edgesData = struct.unpack(f'{edgeCount * 4}I', data[index:index + edgeCount * 4 * 4])
-    index += edgeCount * 4 * 4
+    edgesData = struct.unpack(f'{edgeCount * 2}I', data[index:index + edgeCount * 2 * 4])
+    index += edgeCount * 2 * 4
 
     for edgeIdx in range(edgeCount):
-        v1 = edgesData[edgeIdx * 4]
-        v2 = edgesData[edgeIdx * 4 + 1]
+        v1 = edgesData[edgeIdx * 2]
+        v2 = edgesData[edgeIdx * 2 + 1]
         edge = bm.edges.new((bm.verts[v1], bm.verts[v2]))
-        edge.smooth = bool(edgesData[edgeIdx * 4 + 2])
-        edge.seam = bool(edgesData[edgeIdx * 4 + 3])
+
+    bm.edges.ensure_lookup_table()
+
+    edges_smooth_buffer_size, index = common.decodeInt(data, index)
+    edges_smooth_buffer = struct.unpack(f'{edges_smooth_buffer_size}I',
+                                        data[index:index + edges_smooth_buffer_size * 4])
+    index += edges_smooth_buffer_size * 4
+
+    for edge_idx, smooth in enumerate(run_length_decoding(edges_smooth_buffer)):
+        bm.edges[edge_idx].smooth = smooth
+
+    edges_seam_buffer_size, index = common.decodeInt(data, index)
+    edges_seam_buffer = struct.unpack(f'{edges_seam_buffer_size}I', data[index:index + edges_seam_buffer_size * 4])
+    index += edges_seam_buffer_size * 4
+
+    for edge_idx, seam in enumerate(run_length_decoding(edges_seam_buffer)):
+        bm.edges[edge_idx].seam = seam
 
     index = decode_bmesh_layer(data, index, bm.edges.layers.bevel_weight, bm.edges, decode_layer_float)
     index = decode_bmesh_layer(data, index, bm.edges.layers.crease, bm.edges, decode_layer_float)
