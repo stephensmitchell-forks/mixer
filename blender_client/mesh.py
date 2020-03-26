@@ -124,6 +124,26 @@ def run_length_encoding(l):
     return r
 
 
+def run_length_encoding(l):
+    r = []
+    i = 0
+    first_round = True
+    current_elmt = None
+    current_count = 0
+    for elmt in l:
+        if first_round:
+            first_round = False
+            current_elmt = elmt
+        if elmt != current_elmt:
+            r.extend((current_count, current_elmt))
+            current_elmt = elmt
+            current_count = 0
+        current_count += 1
+    if not first_round:
+        r.extend((current_count, current_elmt))
+    return r
+
+
 def run_length_decoding(l, ignore_value=None):
     if ignore_value == None:
         idx = 0
@@ -319,16 +339,35 @@ def encodeBaseMeshGeometry(mesh_data):
     logger.debug("Writing %d faces", len(bm.faces))
     bm.faces.ensure_lookup_table()
 
-    faces_array = []
+    binary_buffer += struct.pack("1I", len(bm.faces))
+
+    face_verts_count_array = run_length_encoding((len(face.verts) for face in bm.faces))
+    stats_timer.checkpoint("make_face_verts_count_buffer")
+
+    binary_buffer += struct.pack(f"1I{len(face_verts_count_array)}I",
+                                 len(face_verts_count_array), *face_verts_count_array)
+    stats_timer.checkpoint("encode_face_verts_count_buffer")
+
+    faces_verts_idx_array = []
     for face in bm.faces:
-        faces_array.extend((face.material_index, face.smooth, len(face.verts)))
-        faces_array.extend((vert.index for vert in face.verts))
+        faces_verts_idx_array.extend((vert.index for vert in face.verts))
+    stats_timer.checkpoint("make_faces_verts_idx_buffer")
 
-    stats_timer.checkpoint("make_faces_buffer")
+    binary_buffer += struct.pack(f"1I{len(faces_verts_idx_array)}I",
+                                 len(faces_verts_idx_array), * faces_verts_idx_array)
+    stats_timer.checkpoint("encode_faces_verts_idx_buffer")
 
-    binary_buffer += struct.pack(f"1I{len(faces_array)}I", len(bm.faces), *faces_array)
+    face_material_array = run_length_encoding((face.material_index for face in bm.faces))
+    stats_timer.checkpoint("make_face_material_buffer")
 
-    stats_timer.checkpoint("encode_faces_buffer")
+    binary_buffer += struct.pack(f"1I{len(face_material_array)}I", len(face_material_array), *face_material_array)
+    stats_timer.checkpoint("encode_face_material_buffer")
+
+    face_smooth_array = run_length_encoding((face.smooth for face in bm.faces))
+    stats_timer.checkpoint("make_face_smooth_buffer")
+
+    binary_buffer += struct.pack(f"1I{len(face_smooth_array)}I", len(face_smooth_array), *face_smooth_array)
+    stats_timer.checkpoint("encode_face_smooth_buffer")
 
     # Face layers
     # Ignored layers for now: None
@@ -394,8 +433,6 @@ def encodeBaseMesh(obj):
         binary_buffer += struct.pack(f"{fmt_str}", *shape_keys_buffer)
 
         binary_buffer += common.encodeBool(mesh_data.shape_keys.use_relative)
-
-    stats_timer.checkpoint("shape_keys")
 
     # Vertex Groups
     verts_per_group = {}
@@ -588,18 +625,51 @@ def decodeBaseMesh(client, obj, data, index):
     index = decode_bmesh_layer(data, index, bm.edges.layers.crease, bm.edges, decode_layer_float)
 
     faceCount, index = common.decodeInt(data, index)
-    logger.debug("Reading %d faces", faceCount)
+    logger.debug("Reading %d faces %s", faceCount, obj.name)
 
-    for fIdx in range(faceCount):
-        materialIdx, index = common.decodeInt(data, index)
-        smooth, index = common.decodeBool(data, index)
-        vertCount, index = common.decodeInt(data, index)
-        faceVertices = struct.unpack(f'{vertCount}I', data[index:index + vertCount * 4])
-        index += vertCount * 4
-        verts = [bm.verts[i] for i in faceVertices]
-        face = bm.faces.new(verts)
-        face.material_index = materialIdx
-        face.smooth = smooth
+    face_verts_count_buffer_size, index = common.decodeInt(data, index)
+    face_verts_count_buffer = struct.unpack(f'{face_verts_count_buffer_size}I',
+                                            data[index:index + face_verts_count_buffer_size * 4])
+    index += face_verts_count_buffer_size * 4
+
+    face_verts_idx_buffer_size, index = common.decodeInt(data, index)
+    face_verts_idx_buffer = struct.unpack(f'{face_verts_idx_buffer_size}I',
+                                          data[index:index + face_verts_idx_buffer_size * 4])
+    index += face_verts_idx_buffer_size * 4
+
+    verts_offset = 0
+    for face_idx, verts_count in run_length_decoding(face_verts_count_buffer):
+        indices = (face_verts_idx_buffer[i] for i in range(verts_offset, verts_offset + verts_count))
+        face = bm.faces.new([bm.verts[i] for i in indices])
+        verts_offset += verts_count
+    bm.faces.ensure_lookup_table()
+
+    face_material_buffer_size, index = common.decodeInt(data, index)
+    face_material_buffer = struct.unpack(f'{face_material_buffer_size}I',
+                                         data[index:index + face_material_buffer_size * 4])
+    index += face_material_buffer_size * 4
+
+    for face_idx, material_index in run_length_decoding(face_material_buffer, 0):
+        bm.faces[face_idx].material_index = material_index
+
+    face_smooth_size, index = common.decodeInt(data, index)
+    face_smooth = struct.unpack(f'{face_smooth_size}I',
+                                data[index:index + face_smooth_size * 4])
+    index += face_smooth_size * 4
+
+    for face_idx, smooth in run_length_decoding(face_smooth, 0):
+        bm.faces[face_idx].smooth = smooth
+
+    # for fIdx in range(faceCount):
+    #     materialIdx, index = common.decodeInt(data, index)
+    #     smooth, index = common.decodeBool(data, index)
+    #     vertCount, index = common.decodeInt(data, index)
+    #     faceVertices = struct.unpack(f'{vertCount}I', data[index:index + vertCount * 4])
+    #     index += vertCount * 4
+    #     verts = [bm.verts[i] for i in faceVertices]
+    #     face = bm.faces.new(verts)
+    #     face.material_index = materialIdx
+    #     face.smooth = smooth
 
     index = decode_bmesh_layer(data, index, bm.faces.layers.face_map, bm.faces, decode_layer_int)
 
@@ -614,7 +684,7 @@ def decodeBaseMesh(client, obj, data, index):
     shape_keys_count, index = common.decodeInt(data, index)
     obj.shape_key_clear()
     if shape_keys_count > 0:
-        logger.info("Loading %d shape keys", shape_keys_count)
+        logger.debug("Loading %d shape keys", shape_keys_count)
         shapes_keys_list = []
         for i in range(shape_keys_count):
             shape_key_name, index = common.decodeString(data, index)
@@ -623,7 +693,6 @@ def decodeBaseMesh(client, obj, data, index):
             shapes_keys_list[i].vertex_group, index = common.decodeString(data, index)
         for i in range(shape_keys_count):
             relative_key_name, index = common.decodeString(data, index)
-            print(relative_key_name)
             shapes_keys_list[i].relative_key = obj.data.shape_keys.key_blocks[relative_key_name]
 
         for i in range(shape_keys_count):
