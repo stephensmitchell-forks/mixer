@@ -126,7 +126,10 @@ class ClientBlender(Client):
         logger.info("build_rename %s into %s", old_path, new_path)
         old_name = old_path.split("/")[-1]
         new_name = new_path.split("/")[-1]
-        share_data.blender_objects.get(old_name).name = new_name
+        obj = share_data.blender_objects.get(old_name)
+        # obj will be None if a BLENDER_DATA_UPDATE has been processed and resulted in a rename
+        if obj is not None:
+            obj.name = new_name
         share_data.blender_objects_dirty = True
         share_data.old_objects = share_data.blender_objects
 
