@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 # Access path to the ID starting from bpy.data, such as ("cameras", "Camera")
 # or later the path of an ID not in bpy.data if useful
-BlenddataPath = Tuple[str]
+BlenddataPath = List[str]
 
 
 # storing everything in a single dictionary is easier for serialization
@@ -552,10 +552,10 @@ class BpyIDRefProxy(Proxy):
         assert getattr(bpy.data, rna_identifier_to_collection_name[class_bl_rna.identifier], None) is not None
         assert bl_instance.name_full in getattr(bpy.data, rna_identifier_to_collection_name[class_bl_rna.identifier])
 
-        self._blenddata_path = (
+        self._blenddata_path = [
             BlendData.instance().bl_collection_name_from_inner_identifier(class_bl_rna.identifier),
             bl_instance.name_full,
-        )
+        ]
         return self
 
     @property
@@ -924,7 +924,7 @@ class BpyPropDataCollectionProxy(Proxy):
                 # if collection_name == "objects" and isinstance(item.data, T.Mesh):
                 #     continue
                 # # /HACK
-                self._data[name] = BpyIDProxy().load(item, visit_state, (collection_name, name))
+                self._data[name] = BpyIDProxy().load(item, visit_state, [collection_name, name])
 
         return self
 
@@ -962,12 +962,14 @@ class BpyPropDataCollectionProxy(Proxy):
         Args:
             proxy : this proxy contents is used to update the bpy.data collection item
         """
-        collection_name, name = proxy._blenddata_path[0:2]
-        existing_proxy = self._data.get(name)
+        # check by uuid, not key, since this update may as well be a rename. In this case
+        # proxy.collection_key() will be the new name
+        existing_proxy = visit_state.id_proxies.get(proxy.mixer_uuid())
         if existing_proxy is None:
             # only change other state after save, in case of exception
             id_ = proxy.save()
-            self._data[name] = proxy
+            key = proxy.collection_key()
+            self._data[key] = proxy
             uuid = proxy.mixer_uuid()
             visit_state.root_ids.add(id_)
             visit_state.ids[uuid] = id_
@@ -1029,7 +1031,7 @@ class BpyPropDataCollectionProxy(Proxy):
                 logger.warning("update/added for %s[%s] : not found", collection_name, name)
                 continue
             uuid = ensure_uuid(id_)
-            blenddata_path = (collection_name, name)
+            blenddata_path = [collection_name, name]
             visit_state.root_ids.add(id_)
             visit_state.ids[uuid] = id_
             proxy = BpyIDProxy().load(id_, visit_state, blenddata_path)
@@ -1050,9 +1052,16 @@ class BpyPropDataCollectionProxy(Proxy):
             del visit_state.ids[uuid]
 
         for old_name, new_name in diff.items_renamed:
-            # TODO not actually implemented
-            logger.warning("not implemented renamed %s into %s", old_name, new_name)
-            self._data[new_name] = self._data[old_name]
+            logger.info("Rename %s into %s", old_name, new_name)
+            # the name property will be edited as part of the depsgraph update
+
+            # rename the key to access the proxy
+            proxy = self._data[old_name]
+            self._data[new_name] = proxy
+
+            # rename the key inside the proxy
+            proxy._blenddata_path[1] = new_name
+
             del self._data[old_name]
 
         return creations, removals
